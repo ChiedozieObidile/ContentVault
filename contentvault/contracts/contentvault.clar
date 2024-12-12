@@ -11,6 +11,8 @@
 (define-constant err-unauthorized (err u105))
 (define-constant err-auto-renew-failed (err u106))
 (define-constant err-trial-expired (err u107))
+(define-constant err-invalid-subscriber (err u108))
+(define-constant err-invalid-block-height (err u109))
 
 ;; Data Variables
 (define-data-var contract-initialized bool false)
@@ -36,27 +38,40 @@
 (define-private (is-contract-owner)
     (is-eq tx-sender contract-owner))
 
+(define-private (is-valid-tier (tier (string-ascii 6)))
+    (is-some (map-get? subscription-tiers tier)))
+
+(define-private (is-valid-subscriber (subscriber principal))
+    (and 
+        (not (is-eq subscriber contract-owner))
+        (not (is-eq subscriber tx-sender))))
+
 (define-private (is-subscription-active (subscriber principal))
-    (let ((sub (unwrap! (map-get? subscriptions subscriber) false)))
-        (and 
-            (get active sub)
-            (> (get expiration sub) block-height))))
+    (begin 
+        (asserts! (is-valid-subscriber subscriber) false)
+        (let ((sub (unwrap! (map-get? subscriptions subscriber) false)))
+            (and 
+                (get active sub)
+                (> (get expiration sub) block-height)))))
 
 (define-private (auto-renew-subscription (subscriber principal))
-    (let ((current-sub (unwrap! (map-get? subscriptions subscriber) (err err-auto-renew-failed)))
-          (tier-info (unwrap! (map-get? subscription-tiers (get tier current-sub)) (err err-invalid-tier))))
-        
-        (if (get auto-renew current-sub)
-            (begin
-                (map-set subscriptions subscriber
-                    {tier: (get tier current-sub),
-                     expiration: (+ block-height (get duration tier-info)),
-                     active: true,
-                     auto-renew: true,
-                     trial-used: (get trial-used current-sub),
-                     trial-expiration: (get trial-expiration current-sub)})
-                (ok true))
-            (err err-auto-renew-failed))))
+    (begin 
+        (asserts! (is-valid-subscriber subscriber) (err err-invalid-subscriber))
+        (let ((current-sub (unwrap! (map-get? subscriptions subscriber) (err err-auto-renew-failed)))
+              (tier-info (unwrap! (map-get? subscription-tiers (get tier current-sub)) (err err-invalid-tier))))
+            
+            (if (get auto-renew current-sub)
+                (begin
+                    (asserts! (> (get duration tier-info) u0) (err err-invalid-tier))
+                    (map-set subscriptions subscriber
+                        {tier: (get tier current-sub),
+                         expiration: (+ block-height (get duration tier-info)),
+                         active: true,
+                         auto-renew: true,
+                         trial-used: (get trial-used current-sub),
+                         trial-expiration: (get trial-expiration current-sub)})
+                    (ok true))
+                (err err-auto-renew-failed)))))
 
 ;; Public Functions
 (define-public (initialize)
@@ -87,32 +102,40 @@
         (ok true)))
 
 (define-public (subscribe (tier (string-ascii 6)) (enable-auto-renew (optional bool)))
-    (let ((tier-info (unwrap! (map-get? subscription-tiers tier) err-invalid-tier))
-          (price (get price tier-info))
-          (duration (get duration tier-info))
-          (trial-duration (get trial-duration tier-info))
-          (current-sub (map-get? subscriptions tx-sender)))
+    (begin 
+        ;; Validate tier
+        (asserts! (is-valid-tier tier) err-invalid-tier)
         
-        ;; Check if subscriber has not used trial before
-        (asserts! 
-            (or 
-                (is-none current-sub) 
-                (not (get trial-used (unwrap-panic current-sub))))
-            err-trial-expired)
-        
-        ;; Create or update subscription
-        (map-set subscriptions tx-sender
-            {tier: tier,
-             expiration: (+ block-height 
-                            (if (is-none current-sub) 
-                                trial-duration 
-                                duration)),
-             active: true,
-             auto-renew: (default-to false enable-auto-renew),
-             trial-used: (is-none current-sub),
-             trial-expiration: (+ block-height trial-duration)})
-        
-        (ok true)))
+        (let ((tier-info (unwrap! (map-get? subscription-tiers tier) err-invalid-tier))
+              (price (get price tier-info))
+              (duration (get duration tier-info))
+              (trial-duration (get trial-duration tier-info))
+              (current-sub (map-get? subscriptions tx-sender)))
+            
+            ;; Check if subscriber has not used trial before
+            (asserts! 
+                (or 
+                    (is-none current-sub) 
+                    (not (get trial-used (unwrap-panic current-sub))))
+                err-trial-expired)
+            
+            ;; Validate block height calculations
+            (asserts! (> duration u0) err-invalid-tier)
+            (asserts! (> trial-duration u0) err-invalid-tier)
+            
+            ;; Create or update subscription
+            (map-set subscriptions tx-sender
+                {tier: tier,
+                 expiration: (+ block-height 
+                                (if (is-none current-sub) 
+                                    trial-duration 
+                                    duration)),
+                 active: true,
+                 auto-renew: (default-to false enable-auto-renew),
+                 trial-used: (is-none current-sub),
+                 trial-expiration: (+ block-height trial-duration)})
+            
+            (ok true))))
 
 (define-public (renew-subscription)
     (let ((current-sub (unwrap! (map-get? subscriptions tx-sender) err-unauthorized))
@@ -159,7 +182,9 @@
             (ok true))))
 
 (define-public (check-subscription (subscriber principal))
-    (ok (is-subscription-active subscriber)))
+    (begin
+        (asserts! (is-valid-subscriber subscriber) (err err-invalid-subscriber))
+        (ok (is-subscription-active subscriber))))
 
 (define-read-only (get-subscription-info (subscriber principal))
     (map-get? subscriptions subscriber))
