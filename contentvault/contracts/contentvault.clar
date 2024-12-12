@@ -1,5 +1,4 @@
 ;; ContentVault: Tokenized Subscription Service
-;; Author: Claude
 ;; Description: Smart contract for managing subscription-based access to digital content
 
 ;; Constants
